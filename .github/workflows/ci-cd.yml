@@ -2,13 +2,14 @@ name: CI/CD - Build, Push to ECR & Deploy to ECS
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main ]
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     env:
       IMAGE_TAG: ${{ github.sha }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,24 +24,50 @@ jobs:
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v1
 
-      - name: Build, tag, and push image to ECR
+      - name: Build, tag, and push image to ECR (fixed)
         env:
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
+          RAW_REPO: ${{ secrets.ECR_REPOSITORY }}
+          REGION: ${{ secrets.AWS_REGION }}
         run: |
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${ECR_REPOSITORY}:${IMAGE_TAG}"
+          # Trim CRLF from repo name (Windows copy/paste issue)
+          REPO=$(printf "%s" "$RAW_REPO" | tr -d '\r\n' | tr -d '[:space:]')
+
+          # If REPO accidentally contains full URI, extract repo name only
+          if echo "$REPO" | grep -q "/"; then
+            REPO=$(echo "$REPO" | awk -F/ '{print $NF}')
+          fi
+
+          # Get clean AWS account ID
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text | tr -d '\r\n')
+
+          IMAGE_TAG="${{ github.sha }}"
+          IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${REPO}:${IMAGE_TAG}"
+
           echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_OUTPUT
+          echo "Building Docker image: $IMAGE_URI"
+
           docker build -t "$IMAGE_URI" ./backend
           docker push "$IMAGE_URI"
 
       - name: Prepare task definition
         run: |
-          # taskdef-template.json contains placeholder IMAGE_URI that we replace
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:${IMAGE_TAG}"
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text | tr -d '\r\n')
+          REGION=${{ secrets.AWS_REGION }}
+          REPO=${{ secrets.ECR_REPOSITORY }}
+
+          # Clean repo name
+          REPO=$(printf "%s" "$REPO" | tr -d '\r\n' | tr -d '[:space:]')
+
+          # Extract if full URI given
+          if echo "$REPO" | grep -q "/"; then
+            REPO=$(echo "$REPO" | awk -F/ '{print $NF}')
+          fi
+
+          IMAGE_TAG="${{ github.sha }}"
+          IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${REPO}:${IMAGE_TAG}"
+
           cat taskdef-template.json | sed "s|IMAGE_URI|${IMAGE_URI}|g" > taskdef.json
-          echo "Generated taskdef.json:"
+          echo "taskdef.json prepared:"
           cat taskdef.json
 
       - name: Register new task definition
@@ -49,4 +76,7 @@ jobs:
 
       - name: Update ECS Service
         run: |
-          aws ecs update-service --cluster ${{ secrets.ECS_CLUSTER }} --service ${{ secrets.ECS_SERVICE }} --force-new-deployment
+          aws ecs update-service \
+            --cluster ${{ secrets.ECS_CLUSTER }} \
+            --service ${{ secrets.ECS_SERVICE }} \
+            --force-new-deployment
