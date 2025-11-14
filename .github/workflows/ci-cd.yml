@@ -21,18 +21,23 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
+      # Debugging step — shows the exact repo name from secrets
+      - name: Debug repository name
+        run: |
+          echo "ECR_REPOSITORY SECRET RAW: '${{ secrets.ECR_REPOSITORY }}'"
+
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v1
 
-      - name: Build, tag, and push image to ECR (fixed)
+      - name: Build, tag, and push image to ECR
         env:
           RAW_REPO: ${{ secrets.ECR_REPOSITORY }}
           REGION: ${{ secrets.AWS_REGION }}
         run: |
-          # Trim CRLF from repo name (Windows copy/paste issue)
+          # Clean repository name (remove CRLF/spaces)
           REPO=$(printf "%s" "$RAW_REPO" | tr -d '\r\n' | tr -d '[:space:]')
 
-          # If REPO accidentally contains full URI, extract repo name only
+          # Extract repo name if full URI is accidentally used
           if echo "$REPO" | grep -q "/"; then
             REPO=$(echo "$REPO" | awk -F/ '{print $NF}')
           fi
@@ -43,22 +48,20 @@ jobs:
           IMAGE_TAG="${{ github.sha }}"
           IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${REPO}:${IMAGE_TAG}"
 
-          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_OUTPUT
-          echo "Building Docker image: $IMAGE_URI"
+          echo "IMAGE_URI=${IMAGE_URI}" >> $GITHUB_OUTPUT
+          echo "Building image: ${IMAGE_URI}"
 
-          docker build -t "$IMAGE_URI" ./backend
-          docker push "$IMAGE_URI"
+          docker build -t "${IMAGE_URI}" ./backend
+          docker push "${IMAGE_URI}"
 
       - name: Prepare task definition
         run: |
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text | tr -d '\r\n')
           REGION=${{ secrets.AWS_REGION }}
-          REPO=${{ secrets.ECR_REPOSITORY }}
+          RAW_REPO=${{ secrets.ECR_REPOSITORY }}
 
-          # Clean repo name
-          REPO=$(printf "%s" "$REPO" | tr -d '\r\n' | tr -d '[:space:]')
+          REPO=$(printf "%s" "$RAW_REPO" | tr -d '\r\n' | tr -d '[:space:]')
 
-          # Extract if full URI given
           if echo "$REPO" | grep -q "/"; then
             REPO=$(echo "$REPO" | awk -F/ '{print $NF}')
           fi
@@ -66,15 +69,15 @@ jobs:
           IMAGE_TAG="${{ github.sha }}"
           IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${REPO}:${IMAGE_TAG}"
 
-          cat taskdef-template.json | sed "s|IMAGE_URI|${IMAGE_URI}|g" > taskdef.json
-          echo "taskdef.json prepared:"
+          sed "s|IMAGE_URI|${IMAGE_URI}|g" taskdef-template.json > taskdef.json
+          echo "Generated taskdef.json:"
           cat taskdef.json
 
       - name: Register new task definition
         run: |
           aws ecs register-task-definition --cli-input-json file://taskdef.json
 
-      - name: Update ECS Service
+      - name: Update ECS service
         run: |
           aws ecs update-service \
             --cluster ${{ secrets.ECS_CLUSTER }} \
