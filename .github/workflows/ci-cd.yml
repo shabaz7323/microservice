@@ -11,75 +11,43 @@ jobs:
       IMAGE_TAG: ${{ github.sha }}
 
     steps:
-      - name: Checkout
+      - name: Checkout source code
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # Debugging step — shows the exact repo name from secrets
-      - name: Debug repository name
-        run: |
-          echo "ECR_REPOSITORY SECRET RAW: '${{ secrets.ECR_REPOSITORY }}'"
-
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v1
 
-      - name: Build, tag, and push image to ECR
+      - name: Build, Tag and Push Docker image to ECR
         env:
-          RAW_REPO: ${{ secrets.ECR_REPOSITORY }}
+          REPO: ${{ secrets.ECR_REPOSITORY }}
           REGION: ${{ secrets.AWS_REGION }}
         run: |
-          # Clean repository name (remove CRLF/spaces)
-          REPO=$(printf "%s" "$RAW_REPO" | tr -d '\r\n' | tr -d '[:space:]')
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text | tr -d '\r\n')
 
-          # Extract repo name if full URI is accidentally used
+          # Clean repo name
+          REPO=$(printf "%s" "$REPO" | tr -d '\r\n' | tr -d '[:space:]')
+
+          # Extract repo name if full URI was entered accidentally
           if echo "$REPO" | grep -q "/"; then
             REPO=$(echo "$REPO" | awk -F/ '{print $NF}')
           fi
 
-          # Get clean AWS account ID
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text | tr -d '\r\n')
-
-          IMAGE_TAG="${{ github.sha }}"
           IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${REPO}:${IMAGE_TAG}"
-
           echo "IMAGE_URI=${IMAGE_URI}" >> $GITHUB_OUTPUT
-          echo "Building image: ${IMAGE_URI}"
 
           docker build -t "${IMAGE_URI}" ./backend
           docker push "${IMAGE_URI}"
 
-      - name: Prepare task definition
+      - name: Prepare ECS task definition
         run: |
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text | tr -d '\r\n')
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           REGION=${{ secrets.AWS_REGION }}
-          RAW_REPO=${{ secrets.ECR_REPOSITORY }}
-
-          REPO=$(printf "%s" "$RAW_REPO" | tr -d '\r\n' | tr -d '[:space:]')
-
-          if echo "$REPO" | grep -q "/"; then
-            REPO=$(echo "$REPO" | awk -F/ '{print $NF}')
-          fi
-
-          IMAGE_TAG="${{ github.sha }}"
-          IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${REPO}:${IMAGE_TAG}"
-
-          sed "s|IMAGE_URI|${IMAGE_URI}|g" taskdef-template.json > taskdef.json
-          echo "Generated taskdef.json:"
-          cat taskdef.json
-
-      - name: Register new task definition
-        run: |
-          aws ecs register-task-definition --cli-input-json file://taskdef.json
-
-      - name: Update ECS service
-        run: |
-          aws ecs update-service \
-            --cluster ${{ secrets.ECS_CLUSTER }} \
-            --service ${{ secrets.ECS_SERVICE }} \
-            --force-new-deployment
+          REPO=${{ secrets.ECR_REPOSITORY }}
+          REPO=$(printf "%s"
